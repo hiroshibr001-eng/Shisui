@@ -1,0 +1,9 @@
+BrunoFrameOverlay V3.0 - Patch-only
+
+Correções:
+- Flow Scale agora muda o cálculo do FPS gerado/HUD e é reenviado ao Native ao vivo.
+- Primeiro frame no HyperOS: gate menos agressivo para evitar ficar preso em Inicializando captura.
+- Removida mensagem longa de prime do painel/HUD.
+
+Aplicação:
+Extraia patch_v28 por cima do projeto atual e mantenha a libbrunolsfg.so já funcionando.

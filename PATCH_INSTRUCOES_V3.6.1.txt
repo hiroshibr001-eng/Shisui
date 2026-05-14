@@ -1,0 +1,25 @@
+BrunoFrameOverlay V3.6.1 - correção de compile Java
+
+Corrige erro de javac após aplicar V3.6:
+- LsfgConfig.getRenderScalePercent(...)
+- LsfgConfig.setRenderScalePercent(...)
+- LsfgConfig.isBatterySaverEnabled(...)
+- LsfgConfig.setBatterySaverEnabled(...)
+- OverlayView.setFpsOnly(...)
+
+Como aplicar:
+1. Extraia este patch por cima da pasta do projeto atual:
+   /storage/emulated/0/Download/BrunoFrameOverlay-V3.3.1-full
+
+2. Não apague:
+   app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+3. Mantenha no gradle.properties:
+   android.useAndroidX=true
+   android.enableJetifier=true
+   android.aapt2FromMavenOverride=/data/user/0/com.itsaky.androidide/files/home/.androidide/aapt2
+
+4. Limpe:
+   rm -rf app/build build .gradle
+
+5. Compile novamente no AndroidIDE.

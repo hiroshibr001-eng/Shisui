@@ -1,0 +1,5 @@
+Depois que o GitHub Actions gerar o artifact, coloque o arquivo final aqui:
+
+app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+Não precisa CMake/NDK no AndroidIDE. O Gradle apenas empacota a .so.

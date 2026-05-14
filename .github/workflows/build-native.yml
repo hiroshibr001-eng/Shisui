@@ -1,0 +1,47 @@
+name: Build Bruno LSFG Native Engine
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/build-native.yml"
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27d
+          add-to-path: false
+
+      - name: Configure native arm64-v8a
+        run: |
+          mkdir -p build-arm64
+          cmake -S native -B build-arm64 \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_STL=c++_static
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Build libbrunolsfg.so
+        run: |
+          cmake --build build-arm64 --config Release -j2
+          mkdir -p out/arm64-v8a
+          cp build-arm64/libbrunolsfg.so out/arm64-v8a/libbrunolsfg.so
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brunolsfg-arm64-v8a
+          path: out/arm64-v8a/libbrunolsfg.so

@@ -1,0 +1,1 @@
+V3.3.2: corrige Manifest merger failed do Shizuku. minSdk agora é 24. Extraia por cima do projeto atual, mantenha libbrunolsfg.so e limpe app/build build .gradle antes de compilar.

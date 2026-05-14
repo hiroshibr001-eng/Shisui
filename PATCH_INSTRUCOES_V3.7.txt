@@ -1,0 +1,22 @@
+BrunoFrameOverlay V3.7 - HUD móvel + painel limpo
+
+Aplicar patch-only por cima da pasta atual, ex:
+/storage/emulated/0/Download/BrunoFrameOverlay-V3.3.1-full
+
+Não apague:
+app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+Depois limpe:
+rm -rf app/build build .gradle
+
+Compile no AndroidIDE.
+
+Novidades:
+- Remove o HUD desenhado dentro do OverlayView.
+- Adiciona FpsHudView como janela própria.
+- HUD FPS pode ser arrastado quando destravado.
+- HUD FPS pode ser redimensionado com pinça.
+- Duplo toque fixa/desfixa o HUD.
+- Painel pela bolha fica mais limpo e não pisca mensagem enquanto você rola.
+- Bolha e painel usam visual neon/cyber inspirado na imagem enviada.
+- Render Scale native V3.6 mantido.

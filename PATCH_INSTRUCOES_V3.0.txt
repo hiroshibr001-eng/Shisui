@@ -1,0 +1,13 @@
+BrunoFrameOverlay V3.0 - Patch-only
+
+Correções principais:
+- FPS atual app corrigido para HyperOS/Free Fire quando MediaProjection fica travado perto de 30 FPS.
+- FPS real gerado por IA agora usa multiplier cheio e limita pelo refresh físico da tela, evitando travar em ~80 quando tela/jogo estão em 90/120.
+- Multiplier/Flow Scale agora são aplicados com debounce e atualização leve no Native, sem revalidar todos os SPIR-V a cada movimento do slider.
+- Reduz chance de crash ao usar 3x + Flow 0.30/0.40 em aparelhos com pouca RAM/GPU mais fraca.
+
+Aplicação:
+Extraia por cima do projeto atual e NÃO apague:
+app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+Depois limpe build/cache e compile no AndroidIDE.

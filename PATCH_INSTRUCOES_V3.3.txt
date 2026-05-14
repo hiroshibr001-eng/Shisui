@@ -1,0 +1,13 @@
+V3.3 PATCH ONLY
+
+Extraia este patch por cima da pasta atual do projeto.
+
+Não apague:
+app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+Depois limpe:
+rm -rf app/build build .gradle
+
+Compile novamente no AndroidIDE.
+
+Novo: ative o Shizuku antes de iniciar o app e use o botão de autorização para FPS SurfaceFlinger.

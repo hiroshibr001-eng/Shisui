@@ -1,0 +1,30 @@
+BrunoFrameOverlay V3.5 - Patch de bateria/eficiência
+
+Aplique este patch por cima da pasta atual do projeto.
+
+Pasta recomendada do usuário:
+/storage/emulated/0/Download/BrunoFrameOverlay-V3.3.1-full
+ou a pasta atual que você está usando no AndroidIDE.
+
+Não apague:
+app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+Depois de aplicar:
+rm -rf app/build build .gradle
+
+Compile de novo no AndroidIDE.
+
+Mudanças V3.5:
+- Render Scale 50% a 100%.
+- Padrão Render Scale 85%.
+- Overlay continua fullscreen; só a captura/processamento interno é reduzido.
+- Modo economia de bateria ativado por padrão.
+- Menos cópia fullscreen Java em Native/Vulkan.
+- HUD atualiza com menos invalidações.
+- SurfaceFlinger/Shizuku faz polling mais lento para gastar menos bateria.
+- Painel pela bolha mantém controle de Render Scale e economia.
+
+Configuração recomendada:
+Brawl Stars: Render Scale 85%, Multiplier 2x, Flow 0.25~0.35.
+Free Fire: Render Scale 75~85%, Multiplier 2x/3x, Flow 0.25~0.35.
+Genshin/NTE: Render Scale 75%, Multiplier 2x, Flow 0.20~0.35.

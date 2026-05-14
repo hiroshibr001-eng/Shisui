@@ -1,0 +1,12 @@
+BrunoFrameOverlay V3.0 - AndroidIDE
+
+1. Extraia o projeto.
+2. Se usar o FULL, coloque libbrunolsfg.so em:
+   app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+3. Abra a pasta principal no AndroidIDE.
+4. Compile :app:assembleDebug.
+
+V3.0:
+- Flow Scale reenviado ao Native e usado no HUD.
+- Primeiro frame HyperOS com gate menos agressivo.
+- Mensagem longa de prime removida do painel/HUD.

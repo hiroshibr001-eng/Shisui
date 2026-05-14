@@ -1,0 +1,6 @@
+Patch V3.3.3
+
+Aplicar por cima do projeto atual.
+Não apague app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so.
+Se você precisou de android.aapt2FromMavenOverride no gradle.properties, mantenha essa linha local.
+Depois limpe app/build, build e .gradle e compile novamente.

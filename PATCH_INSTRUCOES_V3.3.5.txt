@@ -1,0 +1,6 @@
+V3.3.5 - correção Shizuku provider/binder
+
+Aplicar por cima da pasta atual.
+Não apagar app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so.
+Manter gradle.properties com android.useAndroidX=true, android.enableJetifier=true e android.aapt2FromMavenOverride se necessário no AndroidIDE.
+Depois limpar: rm -rf app/build build .gradle

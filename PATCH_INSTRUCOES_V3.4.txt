@@ -1,0 +1,15 @@
+BrunoFrameOverlay V3.4 - Battery/Efficiency
+
+Aplicar patch-only por cima do projeto atual.
+Não apague app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so.
+
+Correções:
+- Reduz cópia bitmap fullscreen em modo Native/Vulkan pass-through.
+- MAX_IMAGES 2 para menor RAM/bateria.
+- Overlay HUD usa hardware layer.
+- SurfaceFlinger/Shizuku faz polling menos agressivo.
+- Painel/HUD atualizam com menor frequência.
+- Mantém HUD 60/120 e painel na bolha.
+
+Depois limpe build:
+rm -rf app/build build .gradle

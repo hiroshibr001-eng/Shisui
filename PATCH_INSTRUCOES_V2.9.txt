@@ -1,0 +1,1 @@
+Extraia o conteúdo de patch_v29 por cima da pasta atual do projeto. Não apague app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so. Limpe app/build build .gradle e compile no AndroidIDE.

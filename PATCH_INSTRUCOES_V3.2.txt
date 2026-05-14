@@ -1,0 +1,14 @@
+BrunoFrameOverlay V3.2 patch
+
+Aplique por cima do projeto atual e mantenha:
+app/src/main/jniLibs/arm64-v8a/libbrunolsfg.so
+
+Depois limpe:
+rm -rf app/build build .gradle
+
+Compile no AndroidIDE.
+
+Correções:
+- HUD compacto 60/120 com correção HyperOS/Free Fire.
+- MediaProjection subcontado 13/20/30 FPS agora é estimado em tiers reais do jogo.
+- FPS IA não fica preso pelo refresh lido incorretamente pelo Android.

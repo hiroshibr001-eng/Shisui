@@ -1,0 +1,28 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.bruno.frameoverlay'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId 'com.bruno.frameoverlay'
+        minSdk 24
+        targetSdk 33
+        versionCode 29
+        versionName '3.7'
+
+
+    }
+
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+
+dependencies {
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+}
