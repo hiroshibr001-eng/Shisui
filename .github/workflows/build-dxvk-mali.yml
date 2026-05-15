@@ -1,0 +1,121 @@
+name: Build DXVK Mali 1.10.3 From ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            unzip \
+            meson ninja-build \
+            mingw-w64 gcc-mingw-w64 g++-mingw-w64 \
+            glslang-tools zip zstd tar file findutils
+
+          sudo update-alternatives --set i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-posix || true
+          sudo update-alternatives --set i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-posix || true
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix || true
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix || true
+
+      - name: Extract DXVK Mali ZIP
+        run: |
+          DXVK_ZIP="$(ls dxvk_1_10_3_mali_full_builder*.zip | head -n 1)"
+
+          if [ -z "$DXVK_ZIP" ]; then
+            echo "DXVK builder ZIP not found at repo root."
+            echo "Upload dxvk_1_10_3_mali_full_builder.zip to the repository root."
+            exit 1
+          fi
+
+          echo "Using ZIP: $DXVK_ZIP"
+          unzip -q "$DXVK_ZIP"
+
+          echo "Repository files:"
+          ls -lah
+
+          test -d dxvk-1.10.3-mali
+          test -f dxvk-1.10.3-mali/meson.build
+          test -f dxvk-1.10.3-mali/build-win32.txt
+          test -f dxvk-1.10.3-mali/build-win64.txt
+
+      - name: Verify DXVK Mali patch source
+        run: |
+          cd dxvk-1.10.3-mali
+          echo "==== RELEASE ===="
+          cat RELEASE || true
+
+          echo "==== MALI PATCH MARKERS ===="
+          grep -R "DXVK-MALI-FIX" -n src/dxvk/dxvk_extensions.cpp src/dxvk/dxvk_memory.cpp || {
+            echo "DXVK-MALI-FIX markers not found. Wrong source?"
+            exit 1
+          }
+
+      - name: Build 32-bit DXVK
+        run: |
+          cd dxvk-1.10.3-mali
+
+          meson setup build.32 \
+            --cross-file build-win32.txt \
+            --buildtype release \
+            --prefix "$PWD/dist32"
+
+          ninja -C build.32 install
+
+          echo "==== 32-bit DLLs ===="
+          find dist32 -iname "*.dll" -exec file {} \;
+
+      - name: Build 64-bit DXVK
+        run: |
+          cd dxvk-1.10.3-mali
+
+          meson setup build.64 \
+            --cross-file build-win64.txt \
+            --buildtype release \
+            --prefix "$PWD/dist64"
+
+          ninja -C build.64 install
+
+          echo "==== 64-bit DLLs ===="
+          find dist64 -iname "*.dll" -exec file {} \;
+
+      - name: Package Winlator DXVK tzst
+        run: |
+          cd dxvk-1.10.3-mali
+
+          rm -rf ../artifact ../pkg ../dlls
+          mkdir -p ../artifact ../pkg/syswow64 ../pkg/system32 ../dlls/x32 ../dlls/x64
+
+          find dist32 -iname "*.dll" -exec cp -v {} ../pkg/syswow64/ \;
+          find dist64 -iname "*.dll" -exec cp -v {} ../pkg/system32/ \;
+
+          cp -v ../pkg/syswow64/*.dll ../dlls/x32/
+          cp -v ../pkg/system32/*.dll ../dlls/x64/
+
+          echo "==== Package layout ===="
+          find ../pkg -type f -maxdepth 3 -exec ls -lh {} \;
+
+          tar -C ../pkg --use-compress-program="zstd -19" -cf ../artifact/dxvk-1.10.3-mali.tzst .
+          zip -r ../artifact/dxvk-1.10.3-mali-dlls.zip ../dlls
+          cp RELEASE ../artifact/RELEASE-dxvk-mali.txt
+
+          echo "==== TZST contents ===="
+          tar --use-compress-program=unzstd -tf ../artifact/dxvk-1.10.3-mali.tzst | sort
+
+          zip -r ../dxvk-mali-artifact.zip ../artifact
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxvk-1.10.3-mali-artifact
+          path: dxvk-mali-artifact.zip
