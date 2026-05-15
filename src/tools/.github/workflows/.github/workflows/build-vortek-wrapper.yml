@@ -1,0 +1,48 @@
+name: Build Vortek Mali Wrapper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu vulkan-headers zstd tar zip file
+
+      - name: Build wrapper aarch64 glibc
+        run: |
+          aarch64-linux-gnu-gcc -O2 -fPIC -shared \
+            src/vortek_mali_wrapper.c \
+            -o libvulkan_vortek.so \
+            -ldl
+          file libvulkan_vortek.so
+          aarch64-linux-gnu-readelf -h libvulkan_vortek.so | head -n 30
+          aarch64-linux-gnu-readelf -Ws libvulkan_vortek.so | grep -E "vk_icdGetInstanceProcAddr|vkGetInstanceProcAddr|vkGetDeviceProcAddr|vkMapMemory" || true
+
+      - name: Repack vortek-2.1.tzst when present
+        run: |
+          mkdir -p artifact
+          cp libvulkan_vortek.so artifact/libvulkan_vortek_mali_wrapper.so
+          if [ -f vortek-2.1.tzst ]; then
+            mkdir -p work_vortek
+            tar --use-compress-program=unzstd -xf vortek-2.1.tzst -C work_vortek
+            test -f work_vortek/usr/lib/libvulkan_vortek.so
+            mv work_vortek/usr/lib/libvulkan_vortek.so work_vortek/usr/lib/libvulkan_vortek_real.so
+            cp libvulkan_vortek.so work_vortek/usr/lib/libvulkan_vortek.so
+            tar -C work_vortek --use-compress-program="zstd -19" -cf artifact/vortek-2.1-mali-wrapper.tzst .
+          else
+            echo "vortek-2.1.tzst not found at repo root; uploaded wrapper .so only."
+          fi
+          zip -r vortek-mali-wrapper-artifact.zip artifact
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortek-mali-wrapper-artifact
+          path: vortek-mali-wrapper-artifact.zip
