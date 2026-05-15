@@ -494,4 +494,4 @@ static PFN_vkVoidFunction get_wrapper_func(const char* pName) {
   if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
   if (!strcmp(pName, "vkCreateInstance")) return (PFN_vkVoidFunction)vkCreateInstance;
   if (!strcmp(pName, "vkCreateDevice")) return (PFN_vkVoidFunction)vkCreateDevice;
-  if (!strcmp(pName, "vk_icdG
+  if (!strcmp(pName, "vk_icdGetInstanceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetInstanceProcAddr;
