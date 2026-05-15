@@ -26,7 +26,7 @@
 #define VKAPI_CALL
 #endif
 
-#define WRAP_VERSION "v1.6-embedded-real-icd-surface-memtype-allocfix"
+#define WRAP_VERSION "v1.7-embedded-real-icd-proc-trace-devicehook"
 
 typedef VkResult (VKAPI_CALL *PFN_vk_icdNegotiateLoaderICDInterfaceVersion_LOCAL)(uint32_t* pSupportedVersion);
 typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vk_icdGetInstanceProcAddr_LOCAL)(VkInstance instance, const char* pName);
@@ -38,6 +38,9 @@ static PFN_vkGetInstanceProcAddr g_real_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_real_gdpa = NULL;
 static PFN_vkMapMemory g_real_vkMapMemory = NULL;
 static PFN_vkAllocateMemory g_real_vkAllocateMemory = NULL;
+static PFN_vkCreateInstance g_real_vkCreateInstance = NULL;
+static PFN_vkCreateDevice g_real_vkCreateDevice = NULL;
+static PFN_vkFreeMemory g_real_vkFreeMemory = NULL;
 static PFN_vkGetPhysicalDeviceMemoryProperties g_real_vkGetPhysicalDeviceMemoryProperties = NULL;
 static PFN_vkGetPhysicalDeviceMemoryProperties2 g_real_vkGetPhysicalDeviceMemoryProperties2 = NULL;
 static PFN_vkEnumerateInstanceExtensionProperties g_real_vkEnumerateInstanceExtensionProperties = NULL;
@@ -56,6 +59,22 @@ static int patch_enabled(void) {
   if (!env) return 1;
   if (!strcmp(env, "0") || !strcasecmp(env, "false") || !strcasecmp(env, "off")) return 0;
   return 1;
+}
+
+
+static int trace_proc_name(const char* name) {
+  if (!name) return 0;
+  if (strstr(name, "Memory")) return 1;
+  if (strstr(name, "Device")) return 1;
+  if (strstr(name, "Instance")) return 1;
+  if (strstr(name, "Enumerate")) return 1;
+  if (strstr(name, "Surface")) return 1;
+  if (!strcmp(name, "vkGetInstanceProcAddr")) return 1;
+  if (!strcmp(name, "vkGetDeviceProcAddr")) return 1;
+  if (!strcmp(name, "vkCreateDevice")) return 1;
+  if (!strcmp(name, "vkAllocateMemory")) return 1;
+  if (!strcmp(name, "vkMapMemory")) return 1;
+  return 0;
 }
 
 static void vlogf(const char* fmt, va_list ap) {
@@ -402,12 +421,70 @@ VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
 }
 
 
+
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
+    const VkInstanceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkInstance* pInstance) {
+  if (!g_real_vkCreateInstance)
+    g_real_vkCreateInstance = (PFN_vkCreateInstance)real_gipa_call(VK_NULL_HANDLE, "vkCreateInstance");
+
+  if (!g_real_vkCreateInstance) {
+    logf_wrap("FATAL: real vkCreateInstance not found");
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+
+  VkResult r = g_real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+  logf_wrap("vkCreateInstance result=%d instance=%p", (int)r, pInstance ? (void*)*pInstance : NULL);
+  return r;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
+    VkPhysicalDevice physicalDevice,
+    const VkDeviceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDevice* pDevice) {
+  if (!g_real_vkCreateDevice)
+    g_real_vkCreateDevice = (PFN_vkCreateDevice)real_gipa_call(VK_NULL_HANDLE, "vkCreateDevice");
+
+  if (!g_real_vkCreateDevice) {
+    logf_wrap("FATAL: real vkCreateDevice not found");
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+
+  uint32_t extCount = pCreateInfo ? pCreateInfo->enabledExtensionCount : 0;
+  logf_wrap("vkCreateDevice called enabledExtensionCount=%u", extCount);
+  if (pCreateInfo && pCreateInfo->ppEnabledExtensionNames) {
+    for (uint32_t i = 0; i < extCount; i++)
+      logf_wrap("  device ext[%u]=%s", i, pCreateInfo->ppEnabledExtensionNames[i] ? pCreateInfo->ppEnabledExtensionNames[i] : "(null)");
+  }
+
+  VkResult r = g_real_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+  logf_wrap("vkCreateDevice result=%d device=%p", (int)r, pDevice ? (void*)*pDevice : NULL);
+  return r;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
+    VkDevice device,
+    VkDeviceMemory memory,
+    const VkAllocationCallbacks* pAllocator) {
+  if (!g_real_vkFreeMemory)
+    g_real_vkFreeMemory = (PFN_vkFreeMemory)real_gdpa_call(device, "vkFreeMemory");
+  logf_wrap("vkFreeMemory memory=%p real=%p", (void*)memory, (void*)g_real_vkFreeMemory);
+  if (g_real_vkFreeMemory)
+    g_real_vkFreeMemory(device, memory, pAllocator);
+}
+
 // Forward declarations required because get_wrapper_func returns these symbols before their definitions.
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDevice* pDevice);
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory);
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
 
@@ -415,53 +492,6 @@ static PFN_vkVoidFunction get_wrapper_func(const char* pName) {
   if (!pName) return NULL;
   if (!strcmp(pName, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
   if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
-  if (!strcmp(pName, "vk_icdGetInstanceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetInstanceProcAddr;
-  if (!strcmp(pName, "vk_icdNegotiateLoaderICDInterfaceVersion")) return (PFN_vkVoidFunction)vk_icdNegotiateLoaderICDInterfaceVersion;
-  if (!strcmp(pName, "vk_icdGetPhysicalDeviceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetPhysicalDeviceProcAddr;
-  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties;
-  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2;
-  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2KHR;
-  if (!strcmp(pName, "vkAllocateMemory")) return (PFN_vkVoidFunction)vkAllocateMemory;
-  if (!strcmp(pName, "vkMapMemory")) return (PFN_vkVoidFunction)vkMapMemory;
-  if (!strcmp(pName, "vkEnumerateInstanceExtensionProperties")) return (PFN_vkVoidFunction)vkEnumerateInstanceExtensionProperties;
-  return NULL;
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
-  if (wrap) return wrap;
-  return real_gipa_call(instance, pName);
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
-  if (wrap) return wrap;
-  return real_gdpa_call(device, pName);
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName) {
-  return vkGetInstanceProcAddr(instance, pName);
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName) {
-  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
-  if (wrap) return wrap;
-  if (load_real_icd() != 0) return NULL;
-  if (g_real_icd_phys) return g_real_icd_phys(instance, pName);
-  return real_gipa_call(instance, pName);
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion) {
-  if (load_real_icd() == 0 && g_real_negotiate)
-    return g_real_negotiate(pSupportedVersion);
-  if (pSupportedVersion) {
-    if (*pSupportedVersion > 5) *pSupportedVersion = 5;
-  }
-  logf_wrap("vk_icdNegotiateLoaderICDInterfaceVersion fallback ok version=%u", pSupportedVersion ? *pSupportedVersion : 0);
-  return VK_SUCCESS;
-}
-
-__attribute__((constructor))
-static void wrapper_ctor(void) {
-  logf_wrap("loaded wrapper %s constructor; MEMTYPE_PATCH=%d", WRAP_VERSION, patch_enabled());
-}
+  if (!strcmp(pName, "vkCreateInstance")) return (PFN_vkVoidFunction)vkCreateInstance;
+  if (!strcmp(pName, "vkCreateDevice")) return (PFN_vkVoidFunction)vkCreateDevice;
+  if (!strcmp(pName, "vk_icdG
