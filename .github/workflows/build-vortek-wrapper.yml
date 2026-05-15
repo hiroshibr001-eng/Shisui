@@ -23,8 +23,16 @@ jobs:
           mkdir -p work_original
           tar --use-compress-program=unzstd -xf vortek-2.1.tzst -C work_original
           test -f work_original/usr/lib/libvulkan_vortek.so
-          xxd -i -n vortek_real_so work_original/usr/lib/libvulkan_vortek.so > src/vortek_real_blob.inc
+
+          cp work_original/usr/lib/libvulkan_vortek.so /tmp/vortek_real_so.bin
+
+          xxd -i /tmp/vortek_real_so.bin \
+            | sed 's/unsigned char .*\\[/unsigned char vortek_real_so[/' \
+            | sed 's/unsigned int .*_len/unsigned int vortek_real_so_len/' \
+            > src/vortek_real_blob.inc
+
           head -n 5 src/vortek_real_blob.inc
+          grep -E "vortek_real_so|vortek_real_so_len" src/vortek_real_blob.inc | head
 
       - name: Build embedded wrapper aarch64 glibc
         run: |
