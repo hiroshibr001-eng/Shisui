@@ -14,7 +14,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libvulkan-dev zstd tar zip file xxd
+          sudo apt install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libvulkan-dev zstd tar zip file python3
 
       - name: Extract original Vortek ICD and create embedded blob
         run: |
@@ -24,14 +24,29 @@ jobs:
           tar --use-compress-program=unzstd -xf vortek-2.1.tzst -C work_original
           test -f work_original/usr/lib/libvulkan_vortek.so
 
-          cp work_original/usr/lib/libvulkan_vortek.so /tmp/vortek_real_so.bin
+          python3 - <<'PY'
+          from pathlib import Path
 
-          xxd -i /tmp/vortek_real_so.bin \
-            | sed 's/unsigned char .*\\[/unsigned char vortek_real_so[/' \
-            | sed 's/unsigned int .*_len/unsigned int vortek_real_so_len/' \
-            > src/vortek_real_blob.inc
+          src = Path("work_original/usr/lib/libvulkan_vortek.so")
+          data = src.read_bytes()
 
-          head -n 5 src/vortek_real_blob.inc
+          out = Path("src/vortek_real_blob.inc")
+          with out.open("w") as f:
+              f.write("#ifndef VORTEK_REAL_BLOB_INC\n")
+              f.write("#define VORTEK_REAL_BLOB_INC\n\n")
+              f.write("static const unsigned char vortek_real_so[] = {\n")
+
+              for i in range(0, len(data), 12):
+                  chunk = data[i:i+12]
+                  line = ", ".join(f"0x{b:02x}" for b in chunk)
+                  f.write(f"  {line},\n")
+
+              f.write("};\n")
+              f.write(f"static const unsigned int vortek_real_so_len = {len(data)};\n\n")
+              f.write("#endif\n")
+          PY
+
+          head -n 10 src/vortek_real_blob.inc
           grep -E "vortek_real_so|vortek_real_so_len" src/vortek_real_blob.inc | head
 
       - name: Build embedded wrapper aarch64 glibc
@@ -49,11 +64,13 @@ jobs:
           mkdir -p artifact
           cp libvulkan_vortek.so artifact/libvulkan_vortek_mali_wrapper_embedded.so
 
+          rm -rf work_vortek
           mkdir -p work_vortek
           tar --use-compress-program=unzstd -xf vortek-2.1.tzst -C work_vortek
           test -f work_vortek/usr/lib/libvulkan_vortek.so
 
           mkdir -p work_vortek/lib
+
           cp work_vortek/usr/lib/libvulkan_vortek.so work_vortek/usr/lib/libvulkan_vortek_original_backup.so
           cp libvulkan_vortek.so work_vortek/usr/lib/libvulkan_vortek.so
           cp libvulkan_vortek.so work_vortek/lib/libvulkan_vortek.so
