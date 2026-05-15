@@ -14,7 +14,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu vulkan-headers zstd tar zip file
+          sudo apt install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libvulkan-dev zstd tar zip file
 
       - name: Build wrapper aarch64 glibc
         run: |
