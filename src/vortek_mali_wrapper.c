@@ -13,6 +13,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <limits.h>
+#include <unistd.h>
 
 #ifndef VKAPI_ATTR
 #define VKAPI_ATTR
@@ -62,27 +64,60 @@ static void mw_log(const char* fmt, ...) {
 static void load_real_icd(void) {
   if (g_real) return;
 
+  char origin_path[PATH_MAX] = {0};
+  char cwd_path[PATH_MAX] = {0};
+  char proc_maps_path[PATH_MAX] = {0};
+
+  // Prefer loading the renamed original ICD from the exact same directory as this wrapper.
+  Dl_info info;
+  if (dladdr((void*)&load_real_icd, &info) && info.dli_fname && info.dli_fname[0]) {
+    snprintf(origin_path, sizeof(origin_path), "%s", info.dli_fname);
+    char* slash = strrchr(origin_path, '/');
+    if (slash) {
+      slash[1] = '\0';
+      strncat(origin_path, "libvulkan_vortek_real.so", sizeof(origin_path) - strlen(origin_path) - 1);
+    } else {
+      origin_path[0] = '\0';
+    }
+  }
+
+  if (getcwd(cwd_path, sizeof(cwd_path))) {
+    size_t len = strlen(cwd_path);
+    if (len + strlen("/libvulkan_vortek_real.so") + 1 < sizeof(cwd_path))
+      strcat(cwd_path, "/libvulkan_vortek_real.so");
+    else
+      cwd_path[0] = '\0';
+  } else {
+    cwd_path[0] = '\0';
+  }
+
   const char* env_path = getenv("VORTEK_REAL_ICD_PATH");
   const char* candidates[] = {
     env_path,
-    "libvulkan_vortek_real.so",
+    origin_path,
+    cwd_path,
     "/usr/lib/libvulkan_vortek_real.so",
+    "/usr/lib/aarch64-linux-gnu/libvulkan_vortek_real.so",
     "/usr/local/lib/libvulkan_vortek_real.so",
+    "./libvulkan_vortek_real.so",
+    "libvulkan_vortek_real.so",
     NULL
   };
 
   for (int i = 0; candidates[i]; i++) {
     if (!candidates[i] || !*candidates[i]) continue;
-    g_real = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
+    dlerror();
+    g_real = dlopen(candidates[i], RTLD_NOW | RTLD_GLOBAL);
     if (g_real) {
       mw_log("loaded real ICD: %s", candidates[i]);
       break;
     }
-    mw_log("dlopen failed for %s: %s", candidates[i], dlerror());
+    const char* e = dlerror();
+    mw_log("dlopen failed for %s: %s", candidates[i], e ? e : "unknown");
   }
 
   if (!g_real) {
-    mw_log("FATAL: could not load libvulkan_vortek_real.so");
+    mw_log("FATAL: could not load libvulkan_vortek_real.so; wrapper path=%s cwd_candidate=%s", origin_path, cwd_path);
     return;
   }
 
@@ -97,7 +132,6 @@ static void load_real_icd(void) {
     (void*)g_real_icd_gipa, (void*)g_real_gipa, (void*)g_real_gdpa,
     (void*)g_real_get_mem_props, (void*)g_real_get_mem_props2, (void*)g_real_map_memory);
 }
-
 static PFN_vkVoidFunction real_instance_proc(VkInstance instance, const char* name) {
   load_real_icd();
   if (g_real_icd_gipa) return g_real_icd_gipa(instance, name);
@@ -250,5 +284,5 @@ VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t
 
 __attribute__((constructor))
 static void on_load(void) {
-  mw_log("loaded wrapper v1.0; MEMTYPE_PATCH=%d", env_enabled("VORTEK_MALI_MEMTYPE_PATCH", 1));
+  mw_log("loaded wrapper v1.1; MEMTYPE_PATCH=%d", env_enabled("VORTEK_MALI_MEMTYPE_PATCH", 1));
 }
