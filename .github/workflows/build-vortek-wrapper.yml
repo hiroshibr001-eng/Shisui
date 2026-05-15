@@ -36,8 +36,13 @@ jobs:
             tar --use-compress-program=unzstd -xf vortek-2.1.tzst -C work_vortek
             test -f work_vortek/usr/lib/libvulkan_vortek.so
 
+            mkdir -p work_vortek/lib
+
             mv work_vortek/usr/lib/libvulkan_vortek.so work_vortek/usr/lib/libvulkan_vortek_real.so
+            cp work_vortek/usr/lib/libvulkan_vortek_real.so work_vortek/lib/libvulkan_vortek_real.so
+
             cp libvulkan_vortek.so work_vortek/usr/lib/libvulkan_vortek.so
+            cp libvulkan_vortek.so work_vortek/lib/libvulkan_vortek.so
 
             tar -C work_vortek --use-compress-program="zstd -19" -cf artifact/vortek-2.1-mali-wrapper.tzst .
           else
@@ -46,7 +51,6 @@ jobs:
           fi
 
           zip -r vortek-mali-wrapper-artifact.zip artifact
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
