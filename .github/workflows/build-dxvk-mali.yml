@@ -39,7 +39,7 @@ jobs:
           fi
 
           echo "Using ZIP: $DXVK_ZIP"
-          unzip -q "$DXVK_ZIP"
+          unzip -q -o "$DXVK_ZIP"
 
           echo "Repository files:"
           ls -lah
