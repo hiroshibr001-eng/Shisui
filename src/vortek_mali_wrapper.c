@@ -26,7 +26,7 @@
 #define VKAPI_CALL
 #endif
 
-#define WRAP_VERSION "v1.5-embedded-real-icd-surface-fix"
+#define WRAP_VERSION "v1.6-embedded-real-icd-surface-memtype-allocfix"
 
 typedef VkResult (VKAPI_CALL *PFN_vk_icdNegotiateLoaderICDInterfaceVersion_LOCAL)(uint32_t* pSupportedVersion);
 typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vk_icdGetInstanceProcAddr_LOCAL)(VkInstance instance, const char* pName);
@@ -37,6 +37,7 @@ static char g_real_path[256] = {0};
 static PFN_vkGetInstanceProcAddr g_real_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_real_gdpa = NULL;
 static PFN_vkMapMemory g_real_vkMapMemory = NULL;
+static PFN_vkAllocateMemory g_real_vkAllocateMemory = NULL;
 static PFN_vkGetPhysicalDeviceMemoryProperties g_real_vkGetPhysicalDeviceMemoryProperties = NULL;
 static PFN_vkGetPhysicalDeviceMemoryProperties2 g_real_vkGetPhysicalDeviceMemoryProperties2 = NULL;
 static PFN_vkEnumerateInstanceExtensionProperties g_real_vkEnumerateInstanceExtensionProperties = NULL;
@@ -337,6 +338,49 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
 }
 
 
+
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
+    VkDevice device,
+    const VkMemoryAllocateInfo* pAllocateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDeviceMemory* pMemory) {
+  if (!g_real_vkAllocateMemory)
+    g_real_vkAllocateMemory = (PFN_vkAllocateMemory)real_gdpa_call(device, "vkAllocateMemory");
+
+  if (!g_real_vkAllocateMemory) {
+    logf_wrap("FATAL: real vkAllocateMemory not found");
+    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+  }
+
+  if (patch_enabled() && pAllocateInfo && pAllocateInfo->memoryTypeIndex == 0) {
+    VkMemoryAllocateInfo alt = *pAllocateInfo;
+    alt.memoryTypeIndex = 1;
+
+    VkResult r_alt = g_real_vkAllocateMemory(device, &alt, pAllocator, pMemory);
+    logf_wrap("vkAllocateMemory FORCE type0->type1 size=%llu originalType=0 altType=1 result=%d",
+              (unsigned long long)pAllocateInfo->allocationSize, (int)r_alt);
+
+    if (r_alt == VK_SUCCESS) {
+      logf_wrap("PATCH APPLIED: vkAllocateMemory type0 redirected to type1");
+      return r_alt;
+    }
+
+    VkResult r_orig = g_real_vkAllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
+    logf_wrap("vkAllocateMemory fallback original type0 size=%llu result=%d",
+              (unsigned long long)pAllocateInfo->allocationSize, (int)r_orig);
+    return r_orig;
+  }
+
+  VkResult r = g_real_vkAllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
+  if (pAllocateInfo) {
+    logf_wrap("vkAllocateMemory passthrough size=%llu type=%u result=%d",
+              (unsigned long long)pAllocateInfo->allocationSize,
+              (unsigned int)pAllocateInfo->memoryTypeIndex, (int)r);
+  }
+  return r;
+}
+
+
 VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
     VkDevice device,
     VkDeviceMemory memory,
@@ -363,6 +407,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName);
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory);
 VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
 
@@ -376,6 +421,7 @@ static PFN_vkVoidFunction get_wrapper_func(const char* pName) {
   if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties;
   if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2;
   if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2KHR;
+  if (!strcmp(pName, "vkAllocateMemory")) return (PFN_vkVoidFunction)vkAllocateMemory;
   if (!strcmp(pName, "vkMapMemory")) return (PFN_vkVoidFunction)vkMapMemory;
   if (!strcmp(pName, "vkEnumerateInstanceExtensionProperties")) return (PFN_vkVoidFunction)vkEnumerateInstanceExtensionProperties;
   return NULL;
