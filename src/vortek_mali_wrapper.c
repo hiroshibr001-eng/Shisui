@@ -1,20 +1,23 @@
-// Vortek Mali-G57 Vulkan ICD wrapper/proxy - experimental
-// Goal: force DXVK away from Vortek memory Type 0 (DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT)
-// by making Type 1 (DEVICE_LOCAL|HOST_VISIBLE|HOST_CACHED) appear coherent and Type 0 non-coherent.
-// This targets DXVK logs like:
-//   VK_ERROR_MEMORY_MAP_FAILED, Mem flags: 0x6, Mem types: 0x3
-// Build target: aarch64-linux-gnu shared object, not Android/NDK.
+// Vortek Mali-G57 Vulkan ICD wrapper/proxy v1.3 - embedded real ICD
+// Goal: intercept Vortek memory properties before DXVK chooses the problematic
+// memory type that triggers VK_ERROR_MEMORY_MAP_FAILED on Mali/Vortek.
+// Build target: aarch64-linux-gnu shared object, loaded inside Winlator rootfs.
 
 #define _GNU_SOURCE
 #include <vulkan/vulkan.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <limits.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
+
+#include "vortek_real_blob.inc"
 
 #ifndef VKAPI_ATTR
 #define VKAPI_ATTR
@@ -23,266 +26,296 @@
 #define VKAPI_CALL
 #endif
 
-// Vulkan ICD private entry type used by loader.
-typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vk_icdGetInstanceProcAddr)(VkInstance instance, const char* pName);
-typedef VkResult (VKAPI_CALL *PFN_vk_icdNegotiateLoaderICDInterfaceVersion)(uint32_t* pSupportedVersion);
+#define WRAP_VERSION "v1.3-embedded-real-icd"
 
-static void* g_real = NULL;
-static PFN_vk_icdGetInstanceProcAddr g_real_icd_gipa = NULL;
+typedef VkResult (VKAPI_CALL *PFN_vk_icdNegotiateLoaderICDInterfaceVersion_LOCAL)(uint32_t* pSupportedVersion);
+typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vk_icdGetInstanceProcAddr_LOCAL)(VkInstance instance, const char* pName);
+typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vk_icdGetPhysicalDeviceProcAddr_LOCAL)(VkInstance instance, const char* pName);
+
+static void* g_real_lib = NULL;
+static char g_real_path[256] = {0};
 static PFN_vkGetInstanceProcAddr g_real_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_real_gdpa = NULL;
-static PFN_vkGetPhysicalDeviceMemoryProperties g_real_get_mem_props = NULL;
-static PFN_vkGetPhysicalDeviceMemoryProperties2 g_real_get_mem_props2 = NULL;
-static PFN_vkMapMemory g_real_map_memory = NULL;
+static PFN_vkMapMemory g_real_vkMapMemory = NULL;
+static PFN_vkGetPhysicalDeviceMemoryProperties g_real_vkGetPhysicalDeviceMemoryProperties = NULL;
+static PFN_vkGetPhysicalDeviceMemoryProperties2 g_real_vkGetPhysicalDeviceMemoryProperties2 = NULL;
+static PFN_vk_icdNegotiateLoaderICDInterfaceVersion_LOCAL g_real_negotiate = NULL;
+static PFN_vk_icdGetInstanceProcAddr_LOCAL g_real_icd_gipa = NULL;
+static PFN_vk_icdGetPhysicalDeviceProcAddr_LOCAL g_real_icd_phys = NULL;
 
-static int env_enabled(const char* name, int def) {
-  const char* v = getenv(name);
-  if (!v || !*v) return def;
-  if (!strcmp(v, "0") || !strcasecmp(v, "false") || !strcasecmp(v, "off")) return 0;
+static const char* log_path(void) {
+  const char* env = getenv("VORTEK_MALI_LOG");
+  if (env && env[0]) return env;
+  return "/storage/emulated/0/Download/vortek_mali_wrapper.log";
+}
+
+static int patch_enabled(void) {
+  const char* env = getenv("VORTEK_MALI_MEMTYPE_PATCH");
+  if (!env) return 1;
+  if (!strcmp(env, "0") || !strcasecmp(env, "false") || !strcasecmp(env, "off")) return 0;
   return 1;
 }
 
-static void mw_log(const char* fmt, ...) {
-  if (!env_enabled("VORTEK_MALI_LOG_ENABLE", 1)) return;
-
-  const char* path = getenv("VORTEK_MALI_LOG");
-  if (!path || !*path) path = "/storage/emulated/0/Download/vortek_mali_wrapper.log";
-
-  FILE* f = fopen(path, "a");
-  if (!f) f = stderr;
-
-  va_list ap;
-  va_start(ap, fmt);
+static void vlogf(const char* fmt, va_list ap) {
+  FILE* f = fopen(log_path(), "a");
+  if (!f) return;
   fprintf(f, "[vortek-mali-wrapper] ");
   vfprintf(f, fmt, ap);
   fprintf(f, "\n");
-  va_end(ap);
-
-  if (f != stderr) fclose(f);
+  fclose(f);
 }
 
-static void load_real_icd(void) {
-  if (g_real) return;
+static void logf_wrap(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vlogf(fmt, ap);
+  va_end(ap);
+}
 
-  char origin_path[PATH_MAX] = {0};
-  char cwd_path[PATH_MAX] = {0};
-  char proc_maps_path[PATH_MAX] = {0};
-
-  // Prefer loading the renamed original ICD from the exact same directory as this wrapper.
-  Dl_info info;
-  if (dladdr((void*)&load_real_icd, &info) && info.dli_fname && info.dli_fname[0]) {
-    snprintf(origin_path, sizeof(origin_path), "%s", info.dli_fname);
-    char* slash = strrchr(origin_path, '/');
-    if (slash) {
-      slash[1] = '\0';
-      strncat(origin_path, "libvulkan_vortek_real.so", sizeof(origin_path) - strlen(origin_path) - 1);
-    } else {
-      origin_path[0] = '\0';
+static int write_all(int fd, const unsigned char* data, unsigned int len) {
+  unsigned int off = 0;
+  while (off < len) {
+    ssize_t n = write(fd, data + off, len - off);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return -1;
     }
+    if (n == 0) return -1;
+    off += (unsigned int)n;
   }
+  return 0;
+}
 
-  if (getcwd(cwd_path, sizeof(cwd_path))) {
-    size_t len = strlen(cwd_path);
-    if (len + strlen("/libvulkan_vortek_real.so") + 1 < sizeof(cwd_path))
-      strcat(cwd_path, "/libvulkan_vortek_real.so");
-    else
-      cwd_path[0] = '\0';
-  } else {
-    cwd_path[0] = '\0';
-  }
+static int extract_real_icd(void) {
+  if (g_real_path[0]) return 0;
 
-  const char* env_path = getenv("VORTEK_REAL_ICD_PATH");
-  const char* candidates[] = {
-    env_path,
-    origin_path,
-    cwd_path,
-    "/usr/lib/libvulkan_vortek_real.so",
-    "/usr/lib/aarch64-linux-gnu/libvulkan_vortek_real.so",
-    "/usr/local/lib/libvulkan_vortek_real.so",
-    "./libvulkan_vortek_real.so",
-    "libvulkan_vortek_real.so",
+  const char* dirs[] = {
+    getenv("TMPDIR"),
+    "/tmp",
+    "/data/data/com.winlator/cache",
+    ".",
     NULL
   };
 
-  for (int i = 0; candidates[i]; i++) {
-    if (!candidates[i] || !*candidates[i]) continue;
-    dlerror();
-    g_real = dlopen(candidates[i], RTLD_NOW | RTLD_GLOBAL);
-    if (g_real) {
-      mw_log("loaded real ICD: %s", candidates[i]);
-      break;
+  for (int i = 0; dirs[i]; i++) {
+    if (!dirs[i] || !dirs[i][0]) continue;
+    char templ[256];
+    snprintf(templ, sizeof(templ), "%s/vortek_real_XXXXXX", dirs[i]);
+    int fd = mkstemp(templ);
+    if (fd < 0) {
+      logf_wrap("extract: mkstemp failed in %s: errno=%d", dirs[i], errno);
+      continue;
     }
-    const char* e = dlerror();
-    mw_log("dlopen failed for %s: %s", candidates[i], e ? e : "unknown");
+
+    if (write_all(fd, vortek_real_so, vortek_real_so_len) != 0) {
+      logf_wrap("extract: write failed path=%s errno=%d", templ, errno);
+      close(fd);
+      unlink(templ);
+      continue;
+    }
+    fsync(fd);
+    close(fd);
+    chmod(templ, 0700);
+    strncpy(g_real_path, templ, sizeof(g_real_path) - 1);
+    logf_wrap("embedded real ICD extracted to %s size=%u", g_real_path, vortek_real_so_len);
+    return 0;
   }
 
-  if (!g_real) {
-    mw_log("FATAL: could not load libvulkan_vortek_real.so; wrapper path=%s cwd_candidate=%s", origin_path, cwd_path);
-    return;
-  }
-
-  g_real_icd_gipa = (PFN_vk_icdGetInstanceProcAddr)dlsym(g_real, "vk_icdGetInstanceProcAddr");
-  g_real_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_real, "vkGetInstanceProcAddr");
-  g_real_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_real, "vkGetDeviceProcAddr");
-  g_real_get_mem_props = (PFN_vkGetPhysicalDeviceMemoryProperties)dlsym(g_real, "vkGetPhysicalDeviceMemoryProperties");
-  g_real_get_mem_props2 = (PFN_vkGetPhysicalDeviceMemoryProperties2)dlsym(g_real, "vkGetPhysicalDeviceMemoryProperties2");
-  g_real_map_memory = (PFN_vkMapMemory)dlsym(g_real, "vkMapMemory");
-
-  mw_log("symbols: icd_gipa=%p gipa=%p gdpa=%p mem=%p mem2=%p map=%p",
-    (void*)g_real_icd_gipa, (void*)g_real_gipa, (void*)g_real_gdpa,
-    (void*)g_real_get_mem_props, (void*)g_real_get_mem_props2, (void*)g_real_map_memory);
+  logf_wrap("FATAL: could not extract embedded real ICD");
+  return -1;
 }
-static PFN_vkVoidFunction real_instance_proc(VkInstance instance, const char* name) {
-  load_real_icd();
-  if (g_real_icd_gipa) return g_real_icd_gipa(instance, name);
-  if (g_real_gipa) return g_real_gipa(instance, name);
-  return g_real ? (PFN_vkVoidFunction)dlsym(g_real, name) : NULL;
+
+static void* resolve_real_sym(const char* name) {
+  if (!g_real_lib) return NULL;
+  void* p = dlsym(g_real_lib, name);
+  return p;
+}
+
+static int load_real_icd(void) {
+  if (g_real_lib) return 0;
+
+  if (extract_real_icd() != 0) return -1;
+
+  g_real_lib = dlopen(g_real_path, RTLD_NOW | RTLD_LOCAL);
+  if (!g_real_lib) {
+    logf_wrap("FATAL: dlopen embedded real ICD failed path=%s err=%s", g_real_path, dlerror());
+    return -1;
+  }
+
+  g_real_icd_gipa = (PFN_vk_icdGetInstanceProcAddr_LOCAL)resolve_real_sym("vk_icdGetInstanceProcAddr");
+  g_real_icd_phys = (PFN_vk_icdGetPhysicalDeviceProcAddr_LOCAL)resolve_real_sym("vk_icdGetPhysicalDeviceProcAddr");
+  g_real_gipa = (PFN_vkGetInstanceProcAddr)resolve_real_sym("vkGetInstanceProcAddr");
+  g_real_gdpa = (PFN_vkGetDeviceProcAddr)resolve_real_sym("vkGetDeviceProcAddr");
+  g_real_negotiate = (PFN_vk_icdNegotiateLoaderICDInterfaceVersion_LOCAL)resolve_real_sym("vk_icdNegotiateLoaderICDInterfaceVersion");
+
+  if (!g_real_gipa && g_real_icd_gipa)
+    g_real_gipa = (PFN_vkGetInstanceProcAddr)g_real_icd_gipa;
+
+  if (g_real_gipa && !g_real_gdpa)
+    g_real_gdpa = (PFN_vkGetDeviceProcAddr)g_real_gipa(VK_NULL_HANDLE, "vkGetDeviceProcAddr");
+
+  logf_wrap("loaded wrapper %s; MEMTYPE_PATCH=%d", WRAP_VERSION, patch_enabled());
+  logf_wrap("loaded embedded real ICD ok path=%s handle=%p gipa=%p gdpa=%p icd_gipa=%p", g_real_path, g_real_lib, (void*)g_real_gipa, (void*)g_real_gdpa, (void*)g_real_icd_gipa);
+
+  return 0;
+}
+
+static PFN_vkVoidFunction real_gipa_call(VkInstance instance, const char* pName) {
+  if (load_real_icd() != 0) return NULL;
+  if (g_real_icd_gipa) {
+    PFN_vkVoidFunction f = g_real_icd_gipa(instance, pName);
+    if (f) return f;
+  }
+  if (g_real_gipa) return g_real_gipa(instance, pName);
+  return NULL;
+}
+
+static PFN_vkVoidFunction real_gdpa_call(VkDevice device, const char* pName) {
+  if (load_real_icd() != 0) return NULL;
+  if (!g_real_gdpa && g_real_gipa)
+    g_real_gdpa = (PFN_vkGetDeviceProcAddr)g_real_gipa(VK_NULL_HANDLE, "vkGetDeviceProcAddr");
+  if (g_real_gdpa) return g_real_gdpa(device, pName);
+  return real_gipa_call(VK_NULL_HANDLE, pName);
 }
 
 static void patch_memory_properties(VkPhysicalDeviceMemoryProperties* p) {
-  if (!p || !env_enabled("VORTEK_MALI_MEMTYPE_PATCH", 1)) return;
+  if (!p || !patch_enabled()) return;
 
-  mw_log("memoryTypeCount=%u memoryHeapCount=%u", p->memoryTypeCount, p->memoryHeapCount);
-  for (uint32_t i = 0; i < p->memoryTypeCount; i++) {
-    mw_log("before type[%u] flags=0x%x heap=%u", i, p->memoryTypes[i].propertyFlags, p->memoryTypes[i].heapIndex);
-  }
+  logf_wrap("vkGetPhysicalDeviceMemoryProperties: count=%u", p->memoryTypeCount);
+  for (uint32_t i = 0; i < p->memoryTypeCount; i++)
+    logf_wrap("  before type[%u] flags=0x%x heap=%u", i, p->memoryTypes[i].propertyFlags, p->memoryTypes[i].heapIndex);
 
-  // Target shape seen in Helio G96 / Mali-G57 / Vortek logs:
-  // Type 0 = 0x7: DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
-  // Type 1 = 0xb: DEVICE_LOCAL | HOST_VISIBLE | HOST_CACHED
-  // DXVK asks for flags 0x6 and bits 0x3, then chooses Type 0 and vkMapMemory fails.
   if (p->memoryTypeCount >= 2) {
     VkMemoryPropertyFlags t0 = p->memoryTypes[0].propertyFlags;
     VkMemoryPropertyFlags t1 = p->memoryTypes[1].propertyFlags;
 
-    const VkMemoryPropertyFlags devHostCoherent =
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-    const VkMemoryPropertyFlags devHostCached =
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-      VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-
-    int t0_matches = (t0 & devHostCoherent) == devHostCoherent;
-    int t1_matches = (t1 & devHostCached) == devHostCached;
-
-    if (t0_matches && t1_matches) {
-      // Hide coherent from Type 0 so DXVK will not select it for HOST_VISIBLE|HOST_COHERENT.
-      p->memoryTypes[0].propertyFlags &= ~VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-      // Make Type 1 satisfy HOST_VISIBLE|HOST_COHERENT queries, pushing DXVK to cached memory.
-      // This is an intentional compatibility lie. If rendering corrupts, disable with:
-      // VORTEK_MALI_MEMTYPE_PATCH=0
-      p->memoryTypes[1].propertyFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-      mw_log("PATCH APPLIED: Type0 flags 0x%x->0x%x, Type1 flags 0x%x->0x%x",
-        t0, p->memoryTypes[0].propertyFlags, t1, p->memoryTypes[1].propertyFlags);
+    const VkMemoryPropertyFlags hostCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if ((t0 & hostCoherent) == hostCoherent && (t1 & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+      p->memoryTypes[0].propertyFlags &= ~(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+      p->memoryTypes[1].propertyFlags |= (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+      logf_wrap("PATCH APPLIED: demoted type0 flags 0x%x -> 0x%x; promoted type1 flags 0x%x -> 0x%x", t0, p->memoryTypes[0].propertyFlags, t1, p->memoryTypes[1].propertyFlags);
     } else {
-      mw_log("patch skipped: unexpected flags t0=0x%x t1=0x%x", t0, t1);
+      logf_wrap("PATCH SKIPPED: pattern mismatch t0=0x%x t1=0x%x", t0, t1);
     }
   }
 
-  for (uint32_t i = 0; i < p->memoryTypeCount; i++) {
-    mw_log("after type[%u] flags=0x%x heap=%u", i, p->memoryTypes[i].propertyFlags, p->memoryTypes[i].heapIndex);
-  }
+  for (uint32_t i = 0; i < p->memoryTypeCount; i++)
+    logf_wrap("  after  type[%u] flags=0x%x heap=%u", i, p->memoryTypes[i].propertyFlags, p->memoryTypes[i].heapIndex);
 }
 
-VKAPI_ATTR void VKAPI_CALL wrap_vkGetPhysicalDeviceMemoryProperties(
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceMemoryProperties* pMemoryProperties) {
-  if (!g_real_get_mem_props)
-    g_real_get_mem_props = (PFN_vkGetPhysicalDeviceMemoryProperties)real_instance_proc(NULL, "vkGetPhysicalDeviceMemoryProperties");
+  if (!g_real_vkGetPhysicalDeviceMemoryProperties)
+    g_real_vkGetPhysicalDeviceMemoryProperties = (PFN_vkGetPhysicalDeviceMemoryProperties)real_gipa_call(VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties");
 
-  if (g_real_get_mem_props)
-    g_real_get_mem_props(physicalDevice, pMemoryProperties);
+  if (!g_real_vkGetPhysicalDeviceMemoryProperties) {
+    logf_wrap("FATAL: real vkGetPhysicalDeviceMemoryProperties not found");
+    memset(pMemoryProperties, 0, sizeof(*pMemoryProperties));
+    return;
+  }
 
+  g_real_vkGetPhysicalDeviceMemoryProperties(physicalDevice, pMemoryProperties);
   patch_memory_properties(pMemoryProperties);
 }
 
-VKAPI_ATTR void VKAPI_CALL wrap_vkGetPhysicalDeviceMemoryProperties2(
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {
-  if (!g_real_get_mem_props2)
-    g_real_get_mem_props2 = (PFN_vkGetPhysicalDeviceMemoryProperties2)real_instance_proc(NULL, "vkGetPhysicalDeviceMemoryProperties2");
+  if (!g_real_vkGetPhysicalDeviceMemoryProperties2)
+    g_real_vkGetPhysicalDeviceMemoryProperties2 = (PFN_vkGetPhysicalDeviceMemoryProperties2)real_gipa_call(VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties2");
 
-  if (g_real_get_mem_props2)
-    g_real_get_mem_props2(physicalDevice, pMemoryProperties);
+  if (!g_real_vkGetPhysicalDeviceMemoryProperties2) {
+    PFN_vkGetPhysicalDeviceMemoryProperties legacy = (PFN_vkGetPhysicalDeviceMemoryProperties)real_gipa_call(VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties");
+    if (legacy && pMemoryProperties) {
+      legacy(physicalDevice, &pMemoryProperties->memoryProperties);
+      patch_memory_properties(&pMemoryProperties->memoryProperties);
+    } else {
+      logf_wrap("FATAL: real vkGetPhysicalDeviceMemoryProperties2 not found");
+    }
+    return;
+  }
 
+  g_real_vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
   if (pMemoryProperties)
     patch_memory_properties(&pMemoryProperties->memoryProperties);
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL wrap_vkMapMemory(
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {
+  vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
     VkDevice device,
     VkDeviceMemory memory,
     VkDeviceSize offset,
     VkDeviceSize size,
     VkMemoryMapFlags flags,
     void** ppData) {
-  if (!g_real_map_memory)
-    g_real_map_memory = (PFN_vkMapMemory)real_instance_proc(NULL, "vkMapMemory");
+  if (!g_real_vkMapMemory)
+    g_real_vkMapMemory = (PFN_vkMapMemory)real_gdpa_call(device, "vkMapMemory");
 
-  if (!g_real_map_memory) {
-    mw_log("vkMapMemory: real function missing");
-    return VK_ERROR_INITIALIZATION_FAILED;
+  if (!g_real_vkMapMemory) {
+    logf_wrap("FATAL: real vkMapMemory not found");
+    return VK_ERROR_MEMORY_MAP_FAILED;
   }
 
-  VkResult r = g_real_map_memory(device, memory, offset, size, flags, ppData);
-  mw_log("vkMapMemory result=%d memory=%p offset=%llu size=%llu flags=0x%x data=%p",
-    r, (void*)memory, (unsigned long long)offset, (unsigned long long)size, flags,
-    ppData ? *ppData : NULL);
+  VkResult r = g_real_vkMapMemory(device, memory, offset, size, flags, ppData);
+  logf_wrap("vkMapMemory offset=%llu size=%llu flags=0x%x result=%d ptr=%p", (unsigned long long)offset, (unsigned long long)size, (unsigned int)flags, (int)r, ppData ? *ppData : NULL);
   return r;
 }
 
-static PFN_vkVoidFunction wrap_name(const char* name, PFN_vkVoidFunction real) {
-  if (!name) return real;
-  if (!strcmp(name, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)&vkGetInstanceProcAddr;
-  if (!strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)&vkGetDeviceProcAddr;
-  if (!strcmp(name, "vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)&wrap_vkGetPhysicalDeviceMemoryProperties;
-  if (!strcmp(name, "vkGetPhysicalDeviceMemoryProperties2")) return (PFN_vkVoidFunction)&wrap_vkGetPhysicalDeviceMemoryProperties2;
-  if (!strcmp(name, "vkMapMemory")) return (PFN_vkVoidFunction)&wrap_vkMapMemory;
-  return real;
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-  load_real_icd();
-  if (!g_real_gdpa) {
-    PFN_vkVoidFunction f = real_instance_proc(NULL, "vkGetDeviceProcAddr");
-    g_real_gdpa = (PFN_vkGetDeviceProcAddr)f;
-  }
-  PFN_vkVoidFunction real = g_real_gdpa ? g_real_gdpa(device, pName) : NULL;
-  return wrap_name(pName, real);
+static PFN_vkVoidFunction get_wrapper_func(const char* pName) {
+  if (!pName) return NULL;
+  if (!strcmp(pName, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
+  if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
+  if (!strcmp(pName, "vk_icdGetInstanceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetInstanceProcAddr;
+  if (!strcmp(pName, "vk_icdNegotiateLoaderICDInterfaceVersion")) return (PFN_vkVoidFunction)vk_icdNegotiateLoaderICDInterfaceVersion;
+  if (!strcmp(pName, "vk_icdGetPhysicalDeviceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetPhysicalDeviceProcAddr;
+  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties;
+  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2;
+  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2KHR;
+  if (!strcmp(pName, "vkMapMemory")) return (PFN_vkVoidFunction)vkMapMemory;
+  return NULL;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-  PFN_vkVoidFunction real = real_instance_proc(instance, pName);
-  return wrap_name(pName, real);
+  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
+  if (wrap) return wrap;
+  return real_gipa_call(instance, pName);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
+  if (wrap) return wrap;
+  return real_gdpa_call(device, pName);
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName) {
-  PFN_vkVoidFunction real = real_instance_proc(instance, pName);
-  return wrap_name(pName, real);
+  return vkGetInstanceProcAddr(instance, pName);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName) {
+  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
+  if (wrap) return wrap;
+  if (load_real_icd() != 0) return NULL;
+  if (g_real_icd_phys) return g_real_icd_phys(instance, pName);
+  return real_gipa_call(instance, pName);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion) {
-  load_real_icd();
-  PFN_vk_icdNegotiateLoaderICDInterfaceVersion real = NULL;
-  if (g_real) real = (PFN_vk_icdNegotiateLoaderICDInterfaceVersion)dlsym(g_real, "vk_icdNegotiateLoaderICDInterfaceVersion");
-
-  if (real) {
-    VkResult r = real(pSupportedVersion);
-    mw_log("vk_icdNegotiateLoaderICDInterfaceVersion real result=%d version=%u", r, pSupportedVersion ? *pSupportedVersion : 0);
-    return r;
+  if (load_real_icd() == 0 && g_real_negotiate)
+    return g_real_negotiate(pSupportedVersion);
+  if (pSupportedVersion) {
+    if (*pSupportedVersion > 5) *pSupportedVersion = 5;
   }
-
-  if (pSupportedVersion && *pSupportedVersion > 5) *pSupportedVersion = 5;
-  mw_log("vk_icdNegotiateLoaderICDInterfaceVersion fallback version=%u", pSupportedVersion ? *pSupportedVersion : 0);
+  logf_wrap("vk_icdNegotiateLoaderICDInterfaceVersion fallback ok version=%u", pSupportedVersion ? *pSupportedVersion : 0);
   return VK_SUCCESS;
 }
 
 __attribute__((constructor))
-static void on_load(void) {
-  mw_log("loaded wrapper v1.1; MEMTYPE_PATCH=%d", env_enabled("VORTEK_MALI_MEMTYPE_PATCH", 1));
+static void wrapper_ctor(void) {
+  logf_wrap("loaded wrapper %s constructor; MEMTYPE_PATCH=%d", WRAP_VERSION, patch_enabled());
 }
