@@ -26,7 +26,7 @@
 #define VKAPI_CALL
 #endif
 
-#define WRAP_VERSION "v1.7-embedded-real-icd-proc-trace-devicehook"
+#define WRAP_VERSION "v1.8-embedded-real-icd-force-surface-trace"
 
 typedef VkResult (VKAPI_CALL *PFN_vk_icdNegotiateLoaderICDInterfaceVersion_LOCAL)(uint32_t* pSupportedVersion);
 typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vk_icdGetInstanceProcAddr_LOCAL)(VkInstance instance, const char* pName);
@@ -63,18 +63,9 @@ static int patch_enabled(void) {
 
 
 static int trace_proc_name(const char* name) {
-  if (!name) return 0;
-  if (strstr(name, "Memory")) return 1;
-  if (strstr(name, "Device")) return 1;
-  if (strstr(name, "Instance")) return 1;
-  if (strstr(name, "Enumerate")) return 1;
-  if (strstr(name, "Surface")) return 1;
-  if (!strcmp(name, "vkGetInstanceProcAddr")) return 1;
-  if (!strcmp(name, "vkGetDeviceProcAddr")) return 1;
-  if (!strcmp(name, "vkCreateDevice")) return 1;
-  if (!strcmp(name, "vkAllocateMemory")) return 1;
-  if (!strcmp(name, "vkMapMemory")) return 1;
-  return 0;
+  // V1.8: log every function request until surface routing is fixed.
+  (void)name;
+  return 1;
 }
 
 static void vlogf(const char* fmt, va_list ap) {
@@ -269,6 +260,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2KHR(
 }
 
 
+
 static int has_instance_ext(uint32_t count, const VkExtensionProperties* props, const char* name) {
   if (!props || !name) return 0;
   for (uint32_t i = 0; i < count; i++) {
@@ -278,53 +270,84 @@ static int has_instance_ext(uint32_t count, const VkExtensionProperties* props, 
   return 0;
 }
 
+static void add_ext_if_room(VkExtensionProperties* props, uint32_t cap, uint32_t* written, const char* name, uint32_t specVersion) {
+  if (!props || !written || !name) return;
+  if (*written >= cap) return;
+  memset(&props[*written], 0, sizeof(VkExtensionProperties));
+  strncpy(props[*written].extensionName, name, VK_MAX_EXTENSION_NAME_SIZE - 1);
+  props[*written].specVersion = specVersion;
+  (*written)++;
+  logf_wrap("PATCH APPLIED: injected instance extension %s", name);
+}
+
+static uint32_t count_missing_forced_exts(uint32_t count, const VkExtensionProperties* props) {
+  uint32_t missing = 0;
+  if (!has_instance_ext(count, props, "VK_KHR_surface")) missing++;
+  if (!has_instance_ext(count, props, "VK_KHR_win32_surface")) missing++;
+  if (!has_instance_ext(count, props, "VK_KHR_get_surface_capabilities2")) missing++;
+  return missing;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
     const char* pLayerName,
     uint32_t* pPropertyCount,
     VkExtensionProperties* pProperties) {
+  logf_wrap("ENTER vkEnumerateInstanceExtensionProperties layer=%s props=%p countPtr=%p requestedCap=%u",
+            (pLayerName && pLayerName[0]) ? pLayerName : "(null)",
+            (void*)pProperties,
+            (void*)pPropertyCount,
+            pPropertyCount ? (unsigned int)*pPropertyCount : 0u);
+
   if (!g_real_vkEnumerateInstanceExtensionProperties)
     g_real_vkEnumerateInstanceExtensionProperties =
       (PFN_vkEnumerateInstanceExtensionProperties)real_gipa_call(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
 
-  if (!g_real_vkEnumerateInstanceExtensionProperties) {
-    logf_wrap("FATAL: real vkEnumerateInstanceExtensionProperties not found");
-    if (pPropertyCount) *pPropertyCount = 0;
-    return VK_ERROR_INITIALIZATION_FAILED;
-  }
-
   // Do not touch explicit layer queries.
-  if (pLayerName && pLayerName[0])
-    return g_real_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+  if (pLayerName && pLayerName[0]) {
+    if (!g_real_vkEnumerateInstanceExtensionProperties) {
+      if (pPropertyCount) *pPropertyCount = 0;
+      logf_wrap("vkEnumerateInstanceExtensionProperties layer query no real func -> 0");
+      return VK_SUCCESS;
+    }
+    VkResult lr = g_real_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+    logf_wrap("vkEnumerateInstanceExtensionProperties layer passthrough result=%d count=%u", (int)lr, pPropertyCount ? (unsigned int)*pPropertyCount : 0u);
+    return lr;
+  }
 
   uint32_t realCount = 0;
-  VkResult r0 = g_real_vkEnumerateInstanceExtensionProperties(pLayerName, &realCount, NULL);
-  if (r0 != VK_SUCCESS && r0 != VK_INCOMPLETE) {
-    logf_wrap("vkEnumerateInstanceExtensionProperties real count failed result=%d", (int)r0);
-    return r0;
-  }
-
   VkExtensionProperties* tmp = NULL;
-  uint32_t gotCount = realCount;
-  if (realCount > 0) {
-    tmp = (VkExtensionProperties*)calloc(realCount, sizeof(VkExtensionProperties));
-    if (!tmp) {
-      logf_wrap("vkEnumerateInstanceExtensionProperties calloc failed count=%u", realCount);
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+  if (g_real_vkEnumerateInstanceExtensionProperties) {
+    VkResult r0 = g_real_vkEnumerateInstanceExtensionProperties(NULL, &realCount, NULL);
+    if (r0 != VK_SUCCESS && r0 != VK_INCOMPLETE) {
+      logf_wrap("vkEnumerateInstanceExtensionProperties real count failed result=%d; using forced surface-only fallback", (int)r0);
+      realCount = 0;
     }
-    VkResult r1 = g_real_vkEnumerateInstanceExtensionProperties(pLayerName, &gotCount, tmp);
-    if (r1 != VK_SUCCESS && r1 != VK_INCOMPLETE) {
-      logf_wrap("vkEnumerateInstanceExtensionProperties real list failed result=%d", (int)r1);
-      free(tmp);
-      return r1;
+
+    if (realCount > 0) {
+      tmp = (VkExtensionProperties*)calloc(realCount, sizeof(VkExtensionProperties));
+      if (!tmp) return VK_ERROR_OUT_OF_HOST_MEMORY;
+      uint32_t gotCount = realCount;
+      VkResult r1 = g_real_vkEnumerateInstanceExtensionProperties(NULL, &gotCount, tmp);
+      if (r1 != VK_SUCCESS && r1 != VK_INCOMPLETE) {
+        logf_wrap("vkEnumerateInstanceExtensionProperties real list failed result=%d; using forced surface-only fallback", (int)r1);
+        free(tmp);
+        tmp = NULL;
+        realCount = 0;
+      } else {
+        realCount = gotCount;
+      }
     }
+  } else {
+    logf_wrap("WARN: real vkEnumerateInstanceExtensionProperties not found; using forced surface-only fallback");
   }
 
-  const int hasSurface = has_instance_ext(gotCount, tmp, VK_KHR_SURFACE_EXTENSION_NAME);
-  const uint32_t finalCount = gotCount + (hasSurface ? 0u : 1u);
+  uint32_t missing = count_missing_forced_exts(realCount, tmp);
+  uint32_t finalCount = realCount + missing;
 
   if (!pProperties) {
     if (pPropertyCount) *pPropertyCount = finalCount;
-    logf_wrap("vkEnumerateInstanceExtensionProperties count real=%u final=%u injected_surface=%d", gotCount, finalCount, hasSurface ? 0 : 1);
+    logf_wrap("vkEnumerateInstanceExtensionProperties COUNT real=%u missingForced=%u final=%u", realCount, missing, finalCount);
     free(tmp);
     return VK_SUCCESS;
   }
@@ -337,24 +360,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
   uint32_t cap = *pPropertyCount;
   uint32_t written = 0;
 
-  for (uint32_t i = 0; i < gotCount && written < cap; i++)
+  for (uint32_t i = 0; i < realCount && written < cap; i++)
     pProperties[written++] = tmp[i];
 
-  if (!hasSurface && written < cap) {
-    memset(&pProperties[written], 0, sizeof(VkExtensionProperties));
-    strncpy(pProperties[written].extensionName, VK_KHR_SURFACE_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-    pProperties[written].specVersion = VK_KHR_SURFACE_SPEC_VERSION;
-    written++;
-    logf_wrap("PATCH APPLIED: injected VK_KHR_surface into instance extension list");
-  }
+  if (!has_instance_ext(realCount, tmp, "VK_KHR_surface"))
+    add_ext_if_room(pProperties, cap, &written, "VK_KHR_surface", 25);
+  if (!has_instance_ext(realCount, tmp, "VK_KHR_win32_surface"))
+    add_ext_if_room(pProperties, cap, &written, "VK_KHR_win32_surface", 6);
+  if (!has_instance_ext(realCount, tmp, "VK_KHR_get_surface_capabilities2"))
+    add_ext_if_room(pProperties, cap, &written, "VK_KHR_get_surface_capabilities2", 1);
 
   *pPropertyCount = written;
-  logf_wrap("vkEnumerateInstanceExtensionProperties list real=%u final=%u cap=%u written=%u injected_surface=%d",
-            gotCount, finalCount, cap, written, hasSurface ? 0 : 1);
+  logf_wrap("vkEnumerateInstanceExtensionProperties LIST real=%u missingForced=%u final=%u cap=%u written=%u",
+            realCount, missing, finalCount, cap, written);
 
   free(tmp);
   return (written < finalCount) ? VK_INCOMPLETE : VK_SUCCESS;
 }
+
 
 
 
@@ -482,80 +505,4 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, co
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance);
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDevice* pDevice);
-VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory);
-VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator);
-VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion);
-VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
-
-static PFN_vkVoidFunction get_wrapper_func(const char* pName) {
-  if (!pName) return NULL;
-  if (!strcmp(pName, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
-  if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
-  if (!strcmp(pName, "vkCreateInstance")) return (PFN_vkVoidFunction)vkCreateInstance;
-  if (!strcmp(pName, "vkCreateDevice")) return (PFN_vkVoidFunction)vkCreateDevice;
-  if (!strcmp(pName, "vk_icdGetInstanceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetInstanceProcAddr;
-if (!strcmp(pName, "vk_icdNegotiateLoaderICDInterfaceVersion")) return (PFN_vkVoidFunction)vk_icdNegotiateLoaderICDInterfaceVersion;
-  if (!strcmp(pName, "vk_icdGetPhysicalDeviceProcAddr")) return (PFN_vkVoidFunction)vk_icdGetPhysicalDeviceProcAddr;
-  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties;
-  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2;
-  if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR")) return (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties2KHR;
-  if (!strcmp(pName, "vkAllocateMemory")) return (PFN_vkVoidFunction)vkAllocateMemory;
-  if (!strcmp(pName, "vkMapMemory")) return (PFN_vkVoidFunction)vkMapMemory;
-  if (!strcmp(pName, "vkFreeMemory")) return (PFN_vkVoidFunction)vkFreeMemory;
-  if (!strcmp(pName, "vkEnumerateInstanceExtensionProperties")) return (PFN_vkVoidFunction)vkEnumerateInstanceExtensionProperties;
-  return NULL;
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
-  if (wrap) {
-    if (trace_proc_name(pName))
-      logf_wrap("vkGetInstanceProcAddr WRAP name=%s ptr=%p", pName ? pName : "(null)", (void*)wrap);
-    return wrap;
-  }
-  PFN_vkVoidFunction real = real_gipa_call(instance, pName);
-  if (trace_proc_name(pName))
-    logf_wrap("vkGetInstanceProcAddr REAL name=%s ptr=%p", pName ? pName : "(null)", (void*)real);
-  return real;
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
-  if (wrap) {
-    if (trace_proc_name(pName))
-      logf_wrap("vkGetDeviceProcAddr WRAP name=%s ptr=%p", pName ? pName : "(null)", (void*)wrap);
-    return wrap;
-  }
-  PFN_vkVoidFunction real = real_gdpa_call(device, pName);
-  if (trace_proc_name(pName))
-    logf_wrap("vkGetDeviceProcAddr REAL name=%s ptr=%p", pName ? pName : "(null)", (void*)real);
-  return real;
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName) {
-  return vkGetInstanceProcAddr(instance, pName);
-}
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName) {
-  PFN_vkVoidFunction wrap = get_wrapper_func(pName);
-  if (wrap) return wrap;
-  if (load_real_icd() != 0) return NULL;
-  if (g_real_icd_phys) return g_real_icd_phys(instance, pName);
-  return real_gipa_call(instance, pName);
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion) {
-  if (load_real_icd() == 0 && g_real_negotiate)
-    return g_real_negotiate(pSupportedVersion);
-  if (pSupportedVersion) {
-    if (*pSupportedVersion > 5) *pSupportedVersion = 5;
-  }
-  logf_wrap("vk_icdNegotiateLoaderICDInterfaceVersion fallback ok version=%u", pSupportedVersion ? *pSupportedVersion : 0);
-  return VK_SUCCESS;
-}
-
-__attribute__((constructor))
-static void wrapper_ctor(void) {
-  logf_wrap("loaded wrapper %s constructor; MEMTYPE_PATCH=%d", WRAP_VERSION, patch_enabled());
-}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevi
