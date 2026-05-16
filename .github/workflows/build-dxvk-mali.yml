@@ -5,9 +5,16 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "dxvk_1_10_3_mali_full_builder*.zip"
+      - ".github/workflows/build-dxvk-mali.yml"
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build
     runs-on: ubuntu-22.04
 
     steps:
@@ -17,11 +24,21 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
+
           sudo apt install -y \
             unzip \
-            meson ninja-build \
-            mingw-w64 gcc-mingw-w64 g++-mingw-w64 \
-            glslang-tools zip zstd tar file findutils
+            meson \
+            ninja-build \
+            mingw-w64 \
+            gcc-mingw-w64 \
+            g++-mingw-w64 \
+            glslang-tools \
+            zip \
+            zstd \
+            tar \
+            file \
+            findutils \
+            coreutils
 
           sudo update-alternatives --set i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-posix || true
           sudo update-alternatives --set i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-posix || true
@@ -30,19 +47,58 @@ jobs:
 
       - name: Extract DXVK Mali ZIP
         run: |
-          DXVK_ZIP="$(ls dxvk_1_10_3_mali_full_builder*.zip | head -n 1)"
+          set -e
+
+          echo "Searching DXVK Mali builder ZIP..."
+
+          DXVK_ZIP="$(ls dxvk_1_10_3_mali_full_builder*.zip 2>/dev/null | sort -V | tail -n 1 || true)"
 
           if [ -z "$DXVK_ZIP" ]; then
             echo "DXVK builder ZIP not found at repo root."
-            echo "Upload dxvk_1_10_3_mali_full_builder.zip to the repository root."
+            echo "Upload file like: dxvk_1_10_3_mali_full_builder_v13.zip"
             exit 1
           fi
 
           echo "Using ZIP: $DXVK_ZIP"
-          unzip -q -o "$DXVK_ZIP"
+
+          rm -rf dxvk-1.10.3-mali
+          rm -rf __dxvk_extract
+          mkdir -p __dxvk_extract
+
+          unzip -q -o "$DXVK_ZIP" -d __dxvk_extract
+
+          echo "Extracted files:"
+          find __dxvk_extract -maxdepth 2 -type f | head -n 80 || true
+          find __dxvk_extract -maxdepth 2 -type d | head -n 80 || true
+
+          if [ -d "__dxvk_extract/dxvk-1.10.3-mali" ]; then
+            echo "Foldered DXVK source detected."
+            mv "__dxvk_extract/dxvk-1.10.3-mali" dxvk-1.10.3-mali
+
+          elif [ -f "__dxvk_extract/meson.build" ]; then
+            echo "Flat DXVK source detected. Moving files into dxvk-1.10.3-mali/"
+            mkdir -p dxvk-1.10.3-mali
+            shopt -s dotglob
+            mv __dxvk_extract/* dxvk-1.10.3-mali/
+
+          else
+            echo "Searching nested DXVK source..."
+            SOURCE_DIR="$(find __dxvk_extract -maxdepth 3 -type f -name meson.build | head -n 1 | xargs -r dirname || true)"
+
+            if [ -z "$SOURCE_DIR" ]; then
+              echo "Could not find meson.build inside ZIP."
+              exit 1
+            fi
+
+            echo "Nested source detected: $SOURCE_DIR"
+            mv "$SOURCE_DIR" dxvk-1.10.3-mali
+          fi
 
           echo "Repository files:"
           ls -lah
+
+          echo "DXVK source files:"
+          ls -lah dxvk-1.10.3-mali
 
           test -d dxvk-1.10.3-mali
           test -f dxvk-1.10.3-mali/meson.build
@@ -51,71 +107,117 @@ jobs:
 
       - name: Verify DXVK Mali patch source
         run: |
+          set -e
+
           cd dxvk-1.10.3-mali
+
           echo "==== RELEASE ===="
-          cat RELEASE || true
+          cat RELEASE 2>/dev/null || true
+          cat RELEASE-dxvk-mali.txt 2>/dev/null || true
 
           echo "==== MALI PATCH MARKERS ===="
-          grep -R "DXVK-MALI-FIX" -n src/dxvk/dxvk_extensions.cpp src/dxvk/dxvk_memory.cpp || {
-            echo "DXVK-MALI-FIX markers not found. Wrong source?"
+          grep -R "DXVK-MALI-FIX" -n src || {
+            echo "No DXVK-MALI-FIX markers found. Wrong ZIP/source."
+            exit 1
+          }
+
+          echo "==== V13 MARKER CHECK ===="
+          grep -R "DXVK-MALI-FIX-V13" -n src || {
+            echo "DXVK-MALI-FIX-V13 marker not found. This is not V13 source."
             exit 1
           }
 
       - name: Build 32-bit DXVK
         run: |
+          set -e
+
           cd dxvk-1.10.3-mali
 
-          meson setup build.32 \
+          rm -rf build.32
+
+          meson setup \
             --cross-file build-win32.txt \
             --buildtype release \
-            --prefix "$PWD/dist32"
+            --prefix /usr \
+            build.32
 
-          ninja -C build.32 install
-
-          echo "==== 32-bit DLLs ===="
-          find dist32 -iname "*.dll" -exec file {} \;
+          ninja -C build.32
 
       - name: Build 64-bit DXVK
         run: |
+          set -e
+
           cd dxvk-1.10.3-mali
 
-          meson setup build.64 \
+          rm -rf build.64
+
+          meson setup \
             --cross-file build-win64.txt \
             --buildtype release \
-            --prefix "$PWD/dist64"
+            --prefix /usr \
+            build.64
 
-          ninja -C build.64 install
-
-          echo "==== 64-bit DLLs ===="
-          find dist64 -iname "*.dll" -exec file {} \;
+          ninja -C build.64
 
       - name: Package Winlator DXVK tzst
         run: |
+          set -e
+
           cd dxvk-1.10.3-mali
 
-          rm -rf ../artifact ../pkg ../dlls
-          mkdir -p ../artifact ../pkg/syswow64 ../pkg/system32 ../dlls/x32 ../dlls/x64
+          rm -rf package artifact
+          mkdir -p package/syswow64
+          mkdir -p package/system32
+          mkdir -p artifact
 
-          find dist32 -iname "*.dll" -exec cp -v {} ../pkg/syswow64/ \;
-          find dist64 -iname "*.dll" -exec cp -v {} ../pkg/system32/ \;
+          echo "==== Copy 32-bit DLLs to syswow64 ===="
 
-          cp -v ../pkg/syswow64/*.dll ../dlls/x32/
-          cp -v ../pkg/system32/*.dll ../dlls/x64/
+          for dll in d3d8 d3d9 d3d10 d3d10_1 d3d10core d3d11 dxgi; do
+            DLL_PATH="$(find build.32 -type f -iname "$dll.dll" | head -n 1 || true)"
+            if [ -n "$DLL_PATH" ]; then
+              echo "32-bit: $dll.dll <- $DLL_PATH"
+              cp -f "$DLL_PATH" "package/syswow64/$dll.dll"
+            else
+              echo "32-bit missing: $dll.dll"
+            fi
+          done
 
-          echo "==== Package layout ===="
-          find ../pkg -type f -maxdepth 3 -exec ls -lh {} \;
+          echo "==== Copy 64-bit DLLs to system32 ===="
 
-          tar -C ../pkg --use-compress-program="zstd -19" -cf ../artifact/dxvk-1.10.3-mali.tzst .
-          zip -r ../artifact/dxvk-1.10.3-mali-dlls.zip ../dlls
-          cp RELEASE ../artifact/RELEASE-dxvk-mali.txt
+          for dll in d3d8 d3d9 d3d10 d3d10_1 d3d10core d3d11 dxgi; do
+            DLL_PATH="$(find build.64 -type f -iname "$dll.dll" | head -n 1 || true)"
+            if [ -n "$DLL_PATH" ]; then
+              echo "64-bit: $dll.dll <- $DLL_PATH"
+              cp -f "$DLL_PATH" "package/system32/$dll.dll"
+            else
+              echo "64-bit missing: $dll.dll"
+            fi
+          done
 
-          echo "==== TZST contents ===="
-          tar --use-compress-program=unzstd -tf ../artifact/dxvk-1.10.3-mali.tzst | sort
+          echo "==== Package content ===="
+          find package -type f -maxdepth 3 -print
 
-          zip -r ../dxvk-mali-artifact.zip ../artifact
+          test -f package/syswow64/d3d9.dll
+          test -f package/system32/d3d9.dll
+
+          echo "==== Verify V13 markers in packaged DLLs ===="
+          grep -aoh "DXVK-MALI-FIX-V13[^[:cntrl:]]*" package/syswow64/d3d9.dll | head
+          grep -aoh "DXVK-MALI-FIX-V13[^[:cntrl:]]*" package/system32/d3d9.dll | head
+
+          echo "1.10.3-mali-v13" > artifact/RELEASE-dxvk-mali.txt
+          echo "DXVK Mali V13 - allocation-failure shadow bypass" >> artifact/RELEASE-dxvk-mali.txt
+
+          tar --use-compress-program=zstd -cf artifact/dxvk-1.10.3-mali.tzst -C package .
+
+          cd package
+          zip -r ../artifact/dxvk-1.10.3-mali-dlls.zip .
+          cd ..
+
+          echo "==== Artifact files ===="
+          ls -lh artifact
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dxvk-1.10.3-mali-artifact
-          path: dxvk-mali-artifact.zip
+          name: dxvk-1.10.3-mali-v13
+          path: dxvk-1.10.3-mali/artifact/*
